@@ -200,3 +200,95 @@ T.test("renderer renders every tracked slot row in order", function()
         T.assertEqual(frame.slotRows[index].text, trackedSlot.key .. ": " .. savedSlot.itemLink)
     end
 end)
+
+T.test("show snapshot reads the local record without capturing and reuses one frame", function()
+    local GGM = loadUI()
+    local record = makeRecord(GGM)
+    local frame = newRenderableFrame(GGM)
+    local db = { marker = "db" }
+    local readCount = 0
+    local createCount = 0
+
+    GGM.GetLocalPlayerRecord = function(api, receivedDB)
+        T.assertEqual(api.marker, "api")
+        T.assertTrue(receivedDB == db)
+        readCount = readCount + 1
+        return record, nil
+    end
+
+    GGM.CaptureAndStoreLocalPlayer = function()
+        error("snapshot UI must not capture or write")
+    end
+
+    GGM.CreateSnapshotTestWindow = function(api)
+        T.assertEqual(api.marker, "api")
+        createCount = createCount + 1
+        return frame
+    end
+
+    local api = {
+        marker = "api",
+        date = function()
+            return "formatted time"
+        end,
+    }
+
+    local firstModel = GGM.ShowSnapshotTestWindow(api, db)
+    local secondModel = GGM.ShowSnapshotTestWindow(api, db)
+
+    T.assertTrue(firstModel.hasSnapshot)
+    T.assertTrue(secondModel.hasSnapshot)
+    T.assertEqual(readCount, 2)
+    T.assertEqual(createCount, 1)
+    T.assertTrue(frame.shown)
+    T.assertEqual(frame.capturedLine.text, "Captured: formatted time")
+end)
+
+T.test("show snapshot uses no saved snapshot when no usable database exists", function()
+    local GGM = loadUI()
+    local frame = newRenderableFrame(GGM)
+    local readCount = 0
+
+    GGM.GetLocalPlayerRecord = function()
+        readCount = readCount + 1
+        return nil, "record-missing"
+    end
+
+    GGM.CreateSnapshotTestWindow = function()
+        return frame
+    end
+
+    local model = GGM.ShowSnapshotTestWindow({ marker = "api" }, nil)
+
+    T.assertFalse(model.hasSnapshot)
+    T.assertEqual(model.emptyStateText, "No saved snapshot")
+    T.assertEqual(readCount, 0)
+    T.assertTrue(frame.emptyState.visible)
+end)
+
+T.test("ggm slash command opens the saved snapshot for the current database", function()
+    local GGM = loadUI()
+    local db = { marker = "db" }
+    local calledApi
+    local calledDB
+
+    GGM.db = db
+    GGM.ShowSnapshotTestWindow = function(api, receivedDB)
+        calledApi = api
+        calledDB = receivedDB
+    end
+
+    local api = {
+        SlashCmdList = {},
+    }
+
+    GGM.RegisterSnapshotTestSlashCommand(api)
+
+    T.assertEqual(api.SLASH_GUILDGEARMEMORY1, "/ggm")
+    T.assertNotNil(api.SlashCmdList.GUILDGEARMEMORY)
+
+    api.SlashCmdList.GUILDGEARMEMORY("")
+
+    T.assertTrue(calledApi == api)
+    T.assertTrue(calledDB == db)
+end)
