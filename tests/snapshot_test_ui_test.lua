@@ -127,6 +127,42 @@ T.test("missing or incomplete records become the no saved snapshot state", funct
     T.assertEqual(invalid.emptyStateText, "No saved snapshot")
 end)
 
+T.test("malformed identity records become the no saved snapshot state", function()
+    local GGM = loadUI()
+    local cases = {
+        function(record) record.identity.key = "" end,
+        function(record) record.identity.key = false end,
+        function(record) record.identity.name = "" end,
+        function(record) record.identity.realm = false end,
+    }
+
+    for _, makeMalformed in ipairs(cases) do
+        local record = makeRecord(GGM)
+        makeMalformed(record)
+        local model = GGM.BuildSnapshotViewModel(record)
+        T.assertFalse(model.hasSnapshot)
+        T.assertEqual(model.emptyStateText, "No saved snapshot")
+    end
+end)
+
+T.test("malformed slot records become the no saved snapshot state", function()
+    local GGM = loadUI()
+    local cases = {
+        function(slot) slot.inventorySlotID = "1" end,
+        function(slot) slot.itemID = 4001; slot.itemLink = false end,
+        function(slot) slot.itemID = false; slot.itemLink = "not-empty" end,
+        function(slot) slot.itemID = nil; slot.itemLink = nil end,
+    }
+
+    for _, makeMalformed in ipairs(cases) do
+        local record = makeRecord(GGM)
+        makeMalformed(record.gear.slots.HEAD)
+        local model = GGM.BuildSnapshotViewModel(record)
+        T.assertFalse(model.hasSnapshot)
+        T.assertEqual(model.emptyStateText, "No saved snapshot")
+    end
+end)
+
 T.test("renderer switches between saved data and no saved snapshot", function()
     local GGM = loadUI()
     local frame = newRenderableFrame(GGM)
@@ -149,4 +185,18 @@ T.test("renderer switches between saved data and no saved snapshot", function()
     T.assertEqual(frame.emptyState.text, "No saved snapshot")
     T.assertFalse(frame.characterLine.visible)
     T.assertFalse(frame.slotRows[1].visible)
+end)
+
+T.test("renderer renders every tracked slot row in order", function()
+    local GGM = loadUI()
+    local frame = newRenderableFrame(GGM)
+    local record = makeRecord(GGM)
+
+    GGM.RenderSnapshotViewModel(frame, GGM.BuildSnapshotViewModel(record))
+
+    for index, trackedSlot in ipairs(GGM.TRACKED_SLOTS) do
+        local savedSlot = record.gear.slots[trackedSlot.key]
+        T.assertTrue(frame.slotRows[index].visible)
+        T.assertEqual(frame.slotRows[index].text, trackedSlot.key .. ": " .. savedSlot.itemLink)
+    end
 end)

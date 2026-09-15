@@ -17,11 +17,19 @@ local function hasValidDisplayShape(record)
         return false
     end
 
+    if type(record.identity.key) ~= "string" or record.identity.key == "" then
+        return false
+    end
+
     if type(record.identity.name) ~= "string" or record.identity.name == "" then
         return false
     end
 
     if type(record.identity.realm) ~= "string" or record.identity.realm == "" then
+        return false
+    end
+
+    if record.identity.key ~= record.identity.name .. "-" .. record.identity.realm then
         return false
     end
 
@@ -53,8 +61,14 @@ function GGM.BuildSnapshotViewModel(record, formatTime)
             return missingModel()
         end
 
+        if type(savedSlot.inventorySlotID) ~= "number" then
+            return missingModel()
+        end
+
         local valueText
-        if type(savedSlot.itemLink) == "string" and savedSlot.itemLink ~= "" then
+        if type(savedSlot.itemID) == "number"
+            and type(savedSlot.itemLink) == "string"
+            and savedSlot.itemLink ~= "" then
             valueText = savedSlot.itemLink
         elseif savedSlot.itemID == false and savedSlot.itemLink == false then
             valueText = "Empty"
