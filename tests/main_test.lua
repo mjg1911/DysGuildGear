@@ -33,6 +33,10 @@ local function withGlobals(replacements, fn)
     end
 end
 
+local function stubSnapshotUI(GGM, registerFn)
+    GGM.RegisterSnapshotTestSlashCommand = registerFn or function() end
+end
+
 T.test("main registers only Phase 1 startup events", function()
     local registered = {}
     local onEvent
@@ -69,6 +73,40 @@ T.test("main registers only Phase 1 startup events", function()
     end)
 end)
 
+T.test("addon loaded registers the snapshot slash command", function()
+    local onEvent
+    local registeredApi
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {}
+        GGM.InitializeDatabase = function(existing)
+            return existing or { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.CaptureAndStoreLocalPlayer = function()
+            return nil, nil
+        end
+        GGM.RegisterSnapshotTestSlashCommand = function(api)
+            registeredApi = api
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+
+        T.assertTrue(registeredApi == _G)
+    end)
+end)
+
 T.test("addon loaded initializes the SavedVariables database", function()
     local onEvent
     local frame = {
@@ -85,6 +123,7 @@ T.test("addon loaded initializes the SavedVariables database", function()
         GuildGearMemoryDB = NIL,
     }, function()
         local GGM = {}
+        stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function(existing)
             T.assertNil(existing)
             return { schemaVersion = 1, characters = {} }, nil
@@ -120,6 +159,7 @@ T.test("player login performs one capture after database initialization", functi
         GuildGearMemoryDB = NIL,
     }, function()
         local GGM = {}
+        stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function()
             return { schemaVersion = 1, characters = {} }, nil
         end
@@ -157,6 +197,7 @@ T.test("unsupported saved schema blocks login capture instead of overwriting dat
         GuildGearMemoryDB = { schemaVersion = 99, characters = {} },
     }, function()
         local GGM = {}
+        stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function()
             return nil, "unsupported-schema-version:99"
         end
