@@ -37,7 +37,7 @@ local function stubSnapshotUI(GGM, registerFn)
     GGM.RegisterSnapshotTestSlashCommand = registerFn or function() end
 end
 
-T.test("main registers only Phase 1 startup events", function()
+T.test("main registers Phase 3 local gear events and no addon-message event", function()
     local registered = {}
     local onEvent
     local frame = {
@@ -57,18 +57,23 @@ T.test("main registers only Phase 1 startup events", function()
         end,
     }, function()
         local GGM = {}
+        stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function(existing)
             return existing or { schemaVersion = 1, characters = {} }, nil
         end
-        GGM.CaptureAndStoreLocalPlayer = function()
-            return { complete = true }, nil
+        GGM.StartLocalPlayerGearTracking = function()
+            return {}, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
         end
 
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
 
         T.assertTrue(registered.ADDON_LOADED == true)
         T.assertTrue(registered.PLAYER_LOGIN == true)
-        T.assertFalse(registered.PLAYER_EQUIPMENT_CHANGED == true)
+        T.assertTrue(registered.PLAYER_EQUIPMENT_CHANGED == true)
+        T.assertFalse(registered.CHAT_MSG_ADDON == true)
         T.assertNotNil(onEvent)
     end)
 end)
@@ -93,8 +98,11 @@ T.test("addon loaded registers the snapshot slash command", function()
         GGM.InitializeDatabase = function(existing)
             return existing or { schemaVersion = 1, characters = {} }, nil
         end
-        GGM.CaptureAndStoreLocalPlayer = function()
+        GGM.StartLocalPlayerGearTracking = function()
             return nil, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
         end
         GGM.RegisterSnapshotTestSlashCommand = function(api)
             registeredApi = api
@@ -128,8 +136,11 @@ T.test("addon loaded initializes the SavedVariables database", function()
             T.assertNil(existing)
             return { schemaVersion = 1, characters = {} }, nil
         end
-        GGM.CaptureAndStoreLocalPlayer = function()
+        GGM.StartLocalPlayerGearTracking = function()
             return nil, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
         end
 
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
@@ -141,7 +152,7 @@ T.test("addon loaded initializes the SavedVariables database", function()
     end)
 end)
 
-T.test("player login performs one capture after database initialization", function()
+T.test("player login starts stable gear tracking after database initialization", function()
     local onEvent
     local frame = {
         RegisterEvent = function() end,
@@ -150,7 +161,8 @@ T.test("player login performs one capture after database initialization", functi
         end,
     }
 
-    local captureCount = 0
+    local startCount = 0
+    local tracker = { pendingBySlot = {} }
 
     withGlobals({
         CreateFrame = function()
@@ -158,28 +170,35 @@ T.test("player login performs one capture after database initialization", functi
         end,
         GuildGearMemoryDB = NIL,
     }, function()
-        local GGM = {}
+        local GGM = {
+            DEFAULT_STABILITY_DELAY_SECONDS = 300,
+        }
         stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function()
             return { schemaVersion = 1, characters = {} }, nil
         end
-        GGM.CaptureAndStoreLocalPlayer = function(api, db)
+        GGM.StartLocalPlayerGearTracking = function(api, db, delay)
             T.assertTrue(api == _G)
             T.assertTrue(db == GGM.db)
-            captureCount = captureCount + 1
-            return { complete = true }, nil
+            T.assertEqual(delay, 300)
+            startCount = startCount + 1
+            return tracker, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
         end
 
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
         onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
         onEvent(frame, "PLAYER_LOGIN")
 
-        T.assertEqual(captureCount, 1)
-        T.assertNil(GGM.lastCaptureError)
+        T.assertEqual(startCount, 1)
+        T.assertTrue(GGM.gearTracker == tracker)
+        T.assertNil(GGM.lastGearTrackingError)
     end)
 end)
 
-T.test("unsupported saved schema blocks login capture instead of overwriting data", function()
+T.test("equipment change routes the changed inventory slot to the active tracker", function()
     local onEvent
     local frame = {
         RegisterEvent = function() end,
@@ -188,7 +207,88 @@ T.test("unsupported saved schema blocks login capture instead of overwriting dat
         end,
     }
 
-    local captureCount = 0
+    local tracker = { pendingBySlot = {} }
+    local routedTracker
+    local routedSlotID
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {
+            DEFAULT_STABILITY_DELAY_SECONDS = 300,
+        }
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function()
+            return { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.StartLocalPlayerGearTracking = function()
+            return tracker, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function(activeTracker, equipmentSlotID)
+            routedTracker = activeTracker
+            routedSlotID = equipmentSlotID
+            return "pending", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+        onEvent(frame, "PLAYER_LOGIN")
+        onEvent(frame, "PLAYER_EQUIPMENT_CHANGED", 16, true)
+
+        T.assertTrue(routedTracker == tracker)
+        T.assertEqual(routedSlotID, 16)
+        T.assertNil(GGM.lastGearTrackingError)
+    end)
+end)
+
+T.test("equipment change before tracker startup is ignored", function()
+    local onEvent
+    local routed = false
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+    }, function()
+        local GGM = {}
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function(existing)
+            return existing or { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.StartLocalPlayerGearTracking = function()
+            return {}, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            routed = true
+            return "pending", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "PLAYER_EQUIPMENT_CHANGED", 16, true)
+
+        T.assertFalse(routed)
+    end)
+end)
+
+T.test("unsupported saved schema blocks tracking instead of overwriting data", function()
+    local onEvent
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    local startCount = 0
 
     withGlobals({
         CreateFrame = function()
@@ -196,21 +296,26 @@ T.test("unsupported saved schema blocks login capture instead of overwriting dat
         end,
         GuildGearMemoryDB = { schemaVersion = 99, characters = {} },
     }, function()
-        local GGM = {}
+        local GGM = {
+            DEFAULT_STABILITY_DELAY_SECONDS = 300,
+        }
         stubSnapshotUI(GGM)
         GGM.InitializeDatabase = function()
             return nil, "unsupported-schema-version:99"
         end
-        GGM.CaptureAndStoreLocalPlayer = function()
-            captureCount = captureCount + 1
+        GGM.StartLocalPlayerGearTracking = function()
+            startCount = startCount + 1
             return nil, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
         end
 
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
         onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
         onEvent(frame, "PLAYER_LOGIN")
 
-        T.assertEqual(captureCount, 0)
+        T.assertEqual(startCount, 0)
         T.assertEqual(GGM.startupError, "unsupported-schema-version:99")
     end)
 end)
