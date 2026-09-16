@@ -129,3 +129,42 @@ T.test("snapshot validator rejects a missing tracked slot", function()
     T.assertFalse(valid)
     T.assertEqual(err, "snapshot-slot-missing:HEAD")
 end)
+
+T.test("single-slot capture returns the same slot shape used by complete snapshots", function()
+    local GGM = loadModules()
+    local api, itemIDs, itemLinks = makeCompleteApi(GGM)
+
+    local slotValue, err = GGM.CapturePlayerGearSlot(api, "HEAD")
+
+    T.assertNil(err)
+    T.assertEqual(slotValue.inventorySlotID, 1)
+    T.assertEqual(slotValue.itemID, itemIDs[1])
+    T.assertEqual(slotValue.itemLink, itemLinks[1])
+end)
+
+T.test("single-slot capture rejects an unknown tracked slot key", function()
+    local GGM = loadModules()
+    local api = makeCompleteApi(GGM)
+
+    local slotValue, err = GGM.CapturePlayerGearSlot(api, "NOT_A_SLOT")
+
+    T.assertNil(slotValue)
+    T.assertEqual(err, "tracked-slot-unknown:NOT_A_SLOT")
+end)
+
+T.test("gear slot comparison notices an item-link change for the same item id", function()
+    local GGM = loadModules()
+    local left = {
+        inventorySlotID = 1,
+        itemID = 1234,
+        itemLink = "|Hitem:1234::::::::|h[Item]|h",
+    }
+    local right = {
+        inventorySlotID = 1,
+        itemID = 1234,
+        itemLink = "|Hitem:1234:999:::::::|h[Item]|h",
+    }
+
+    T.assertFalse(GGM.AreGearSlotValuesEqual(left, right))
+    T.assertTrue(GGM.AreGearSlotValuesEqual(left, left))
+end)

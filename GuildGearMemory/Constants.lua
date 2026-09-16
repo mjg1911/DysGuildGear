@@ -1,6 +1,7 @@
 local _, GGM = ...
 
 GGM.SCHEMA_VERSION = 1
+GGM.DEFAULT_STABILITY_DELAY_SECONDS = 300
 
 GGM.TRACKED_SLOTS = {
     { key = "HEAD", inventoryName = "HeadSlot" },
