@@ -90,7 +90,57 @@ function GGM.ShowSnapshotTestWindow(api, db)
     return model
 end
 
+local function parseRequestedIdentity(message)
+    if type(message) ~= "string" then
+        return nil, nil
+    end
+
+    local targetKey = message:match("^%s*request%s+([^%s]+)%s*$")
+    if not targetKey then
+        if message:match("^%s*request") then
+            return nil, "request-target-invalid"
+        end
+        return nil, nil
+    end
+
+    local name, realm = targetKey:match("^([^-]+)%-(.+)$")
+    if not name or name == "" or not realm or realm == "" then
+        return nil, "request-target-invalid"
+    end
+
+    return {
+        key = targetKey,
+        name = name,
+        realm = realm,
+        guid = nil,
+    }, nil
+end
+
 function GGM.RegisterSnapshotTestSlashCommand(api)
-    api.SlashCmdList = api.SlashCmdList or {}; api.SLASH_GUILDGEARMEMORY1 = "/ggm"
-    api.SlashCmdList.GUILDGEARMEMORY = function() GGM.ShowSnapshotTestWindow(api, GGM.db) end
+    api.SlashCmdList = api.SlashCmdList or {}
+    api.SLASH_GUILDGEARMEMORY1 = "/ggm"
+    api.SlashCmdList.GUILDGEARMEMORY = function(message)
+        local target, requestErr = parseRequestedIdentity(message)
+        if target then
+            if not GGM.guildSync then
+                GGM.lastSyncError = "sync-unavailable"
+                return
+            end
+
+            local queued, queueErr = GGM.RequestCompleteSnapshot(GGM.guildSync, target)
+            if queued then
+                GGM.lastSyncError = nil
+            else
+                GGM.lastSyncError = queueErr
+            end
+            return
+        end
+
+        if requestErr then
+            GGM.lastSyncError = requestErr
+            return
+        end
+
+        GGM.ShowSnapshotTestWindow(api, GGM.db)
+    end
 end

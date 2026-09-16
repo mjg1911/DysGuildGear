@@ -28,7 +28,7 @@ function GGM.GetLocalPlayerRecord(api, db)
     return GGM.GetCompleteCharacterRecord(db, identity.key)
 end
 
-function GGM.StartLocalPlayerGearTracking(api, db, stabilityDelaySeconds)
+function GGM.StartLocalPlayerGearTracking(api, db, stabilityDelaySeconds, onConfirmed)
     local identity, identityErr = GGM.BuildPlayerIdentity(api)
     if not identity then
         return nil, identityErr
@@ -50,7 +50,8 @@ function GGM.StartLocalPlayerGearTracking(api, db, stabilityDelaySeconds)
         api,
         db,
         identity.key,
-        stabilityDelaySeconds
+        stabilityDelaySeconds,
+        onConfirmed
     )
     if not tracker then
         return nil, trackerErr

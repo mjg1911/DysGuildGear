@@ -50,7 +50,7 @@ local function schedulePending(tracker, slotKey, slotValue)
     return "pending", nil
 end
 
-function GGM.CreateStableGearTracker(api, db, characterKey, stabilityDelaySeconds)
+function GGM.CreateStableGearTracker(api, db, characterKey, stabilityDelaySeconds, onConfirmed)
     if type(api) ~= "table"
         or type(api.C_Timer) ~= "table"
         or type(api.C_Timer.NewTimer) ~= "function" then
@@ -63,6 +63,10 @@ function GGM.CreateStableGearTracker(api, db, characterKey, stabilityDelaySecond
 
     if type(api.GetInventorySlotInfo) ~= "function" then
         return nil, "inventory-slot-api-unavailable"
+    end
+
+    if onConfirmed ~= nil and type(onConfirmed) ~= "function" then
+        return nil, "confirmation-callback-invalid"
     end
 
     local delay = stabilityDelaySeconds or GGM.DEFAULT_STABILITY_DELAY_SECONDS
@@ -110,7 +114,9 @@ function GGM.CreateStableGearTracker(api, db, characterKey, stabilityDelaySecond
         pendingBySlot = {},
         slotKeyByInventorySlotID = slotKeyByInventorySlotID,
         nextPendingToken = 0,
+        onConfirmed = onConfirmed,
         lastError = nil,
+        lastConfirmationCallbackError = nil,
     }, nil
 end
 
@@ -193,7 +199,7 @@ function GGM.ConfirmPendingGearSlot(tracker, slotKey, token)
     end
 
     local confirmedAt = tracker.api.GetServerTime()
-    local saved, saveErr = GGM.UpdateConfirmedCharacterSlot(
+    local saved, saveErr, confirmedSequence = GGM.UpdateConfirmedCharacterSlot(
         tracker.db,
         tracker.characterKey,
         slotKey,
@@ -209,5 +215,22 @@ function GGM.ConfirmPendingGearSlot(tracker, slotKey, token)
 
     tracker.pendingBySlot[slotKey] = nil
     tracker.lastError = nil
+    tracker.lastConfirmationCallbackError = nil
+
+    if tracker.onConfirmed then
+        local callbackOk, callbackErr = pcall(
+            tracker.onConfirmed,
+            tracker.characterKey,
+            slotKey,
+            GGM.CopyGearSlotValue(currentSlot),
+            confirmedAt,
+            confirmedSequence
+        )
+
+        if not callbackOk then
+            tracker.lastConfirmationCallbackError = tostring(callbackErr)
+        end
+    end
+
     return true, nil
 end
