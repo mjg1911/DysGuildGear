@@ -7,6 +7,7 @@ local suites = {
     "tests.storage_test",
     "tests.local_gear_memory_test",
     "tests.snapshot_test_ui_test",
+    "tests.stable_gear_tracker_test",
     "tests.main_test",
 }
 

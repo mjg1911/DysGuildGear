@@ -9,6 +9,24 @@ local function copyIdentity(identity)
     }
 end
 
+local function copySlotValue(source)
+    return {
+        inventorySlotID = source.inventorySlotID,
+        itemID = source.itemID,
+        itemLink = source.itemLink,
+    }
+end
+
+local function isTrackedSlotKey(slotKey)
+    for _, slot in ipairs(GGM.TRACKED_SLOTS) do
+        if slot.key == slotKey then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function copySnapshot(snapshot)
     local copied = {
         complete = snapshot.complete,
@@ -17,12 +35,7 @@ local function copySnapshot(snapshot)
     }
 
     for _, slot in ipairs(GGM.TRACKED_SLOTS) do
-        local source = snapshot.slots[slot.key]
-        copied.slots[slot.key] = {
-            inventorySlotID = source.inventorySlotID,
-            itemID = source.itemID,
-            itemLink = source.itemLink,
-        }
+        copied.slots[slot.key] = copySlotValue(snapshot.slots[slot.key])
     end
 
     return copied
@@ -128,4 +141,34 @@ function GGM.GetCompleteCharacterRecord(db, characterKey)
     end
 
     return record, nil
+end
+
+function GGM.UpdateConfirmedCharacterSlot(db, characterKey, slotKey, slotValue, confirmedAt)
+    if not isTrackedSlotKey(slotKey) then
+        return false, "tracked-slot-unknown:" .. tostring(slotKey)
+    end
+
+    if type(confirmedAt) ~= "number" then
+        return false, "confirmed-at-invalid"
+    end
+
+    local record, recordErr = GGM.GetCompleteCharacterRecord(db, characterKey)
+    if not record then
+        return false, recordErr
+    end
+
+    local slotValid, slotErr = GGM.ValidateGearSlotValue(slotKey, slotValue)
+    if not slotValid then
+        return false, slotErr
+    end
+
+    local sharedSlot = record.gear.slots[slotKey]
+    if slotValue.inventorySlotID ~= sharedSlot.inventorySlotID then
+        return false, "snapshot-slot-id-mismatch:" .. slotKey
+    end
+
+    record.gear.slots[slotKey] = copySlotValue(slotValue)
+    record.gear.capturedAt = confirmedAt
+
+    return true, nil
 end

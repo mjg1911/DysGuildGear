@@ -2,13 +2,14 @@
 ## Title: Guild Gear Memory
 ## Notes: Local last-known gear memory for guild characters
 ## Author: Guild Gear Memory contributors
-## Version: 0.2.0-phase2
+## Version: 0.3.0-phase3
 ## SavedVariables: GuildGearMemoryDB
 
 Constants.lua
 CharacterIdentity.lua
 GearSnapshot.lua
 Storage.lua
+StableGearTracker.lua
 LocalGearMemory.lua
 SnapshotTestUI.lua
 Main.lua

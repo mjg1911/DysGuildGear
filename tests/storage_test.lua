@@ -167,3 +167,100 @@ T.test("reading a malformed saved record returns no usable data", function()
     T.assertNil(record)
     T.assertEqual(err, "snapshot-slot-missing:HEAD")
 end)
+
+T.test("confirmed slot update changes only the selected shared slot", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM)))
+
+    local changedHead = {
+        inventorySlotID = 1,
+        itemID = 9999,
+        itemLink = "|Hitem:9999|h[Confirmed Head]|h",
+    }
+
+    local ok, err = GGM.UpdateConfirmedCharacterSlot(
+        db,
+        identity.key,
+        "HEAD",
+        changedHead,
+        1700000300
+    )
+
+    T.assertTrue(ok)
+    T.assertNil(err)
+
+    local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 9999)
+    T.assertEqual(record.gear.slots.NECK.itemID, 2002)
+    T.assertEqual(record.gear.capturedAt, 1700000300)
+end)
+
+T.test("confirmed slot update stores a defensive slot copy", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM)))
+
+    local changedHead = {
+        inventorySlotID = 1,
+        itemID = 9999,
+        itemLink = "|Hitem:9999|h[Confirmed Head]|h",
+    }
+
+    assert(GGM.UpdateConfirmedCharacterSlot(db, identity.key, "HEAD", changedHead, 1700000300))
+    changedHead.itemID = 123
+    changedHead.itemLink = "mutated"
+
+    local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 9999)
+    T.assertEqual(record.gear.slots.HEAD.itemLink, "|Hitem:9999|h[Confirmed Head]|h")
+end)
+
+T.test("confirmed slot update rejects a mismatched inventory slot id without mutation", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM)))
+
+    local wrongSlot = {
+        inventorySlotID = 2,
+        itemID = 9999,
+        itemLink = "|Hitem:9999|h[Wrong Slot]|h",
+    }
+
+    local ok, err = GGM.UpdateConfirmedCharacterSlot(
+        db,
+        identity.key,
+        "HEAD",
+        wrongSlot,
+        1700000300
+    )
+
+    T.assertFalse(ok)
+    T.assertEqual(err, "snapshot-slot-id-mismatch:HEAD")
+
+    local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 2001)
+    T.assertEqual(record.gear.capturedAt, 1700000000)
+end)
+
+T.test("confirmed slot update rejects an unknown slot without mutation", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM)))
+
+    local ok, err = GGM.UpdateConfirmedCharacterSlot(
+        db,
+        identity.key,
+        "NOT_A_SLOT",
+        { inventorySlotID = 1, itemID = 9999, itemLink = "|Hitem:9999|h[Test]|h" },
+        1700000300
+    )
+
+    T.assertFalse(ok)
+    T.assertEqual(err, "tracked-slot-unknown:NOT_A_SLOT")
+    T.assertEqual(db.characters[identity.key].gear.slots.HEAD.itemID, 2001)
+end)

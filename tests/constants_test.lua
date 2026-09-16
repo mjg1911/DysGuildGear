@@ -42,3 +42,10 @@ T.test("schema version starts at one", function()
     T.loadAddonFile("GuildGearMemory/Constants.lua", GGM)
     T.assertEqual(GGM.SCHEMA_VERSION, 1)
 end)
+
+T.test("default stability delay is five minutes", function()
+    local GGM = {}
+    T.loadAddonFile("GuildGearMemory/Constants.lua", GGM)
+
+    T.assertEqual(GGM.DEFAULT_STABILITY_DELAY_SECONDS, 300)
+end)
