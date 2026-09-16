@@ -27,3 +27,35 @@ function GGM.GetLocalPlayerRecord(api, db)
 
     return GGM.GetCompleteCharacterRecord(db, identity.key)
 end
+
+function GGM.StartLocalPlayerGearTracking(api, db, stabilityDelaySeconds)
+    local identity, identityErr = GGM.BuildPlayerIdentity(api)
+    if not identity then
+        return nil, identityErr
+    end
+
+    local record, recordErr = GGM.GetCompleteCharacterRecord(db, identity.key)
+    if not record then
+        if recordErr ~= "record-missing" then
+            return nil, recordErr
+        end
+
+        local capturedRecord, captureErr = GGM.CaptureAndStoreLocalPlayer(api, db)
+        if not capturedRecord then
+            return nil, captureErr
+        end
+    end
+
+    local tracker, trackerErr = GGM.CreateStableGearTracker(
+        api,
+        db,
+        identity.key,
+        stabilityDelaySeconds
+    )
+    if not tracker then
+        return nil, trackerErr
+    end
+
+    local _, reconcileErr = GGM.ReconcileAllGearSlots(tracker)
+    return tracker, reconcileErr
+end
