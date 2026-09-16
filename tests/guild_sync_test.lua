@@ -152,6 +152,35 @@ T.test("a snapshot request produces at most one cached response", function()
     T.assertEqual(#expectedLoserSends, 0)
 end)
 
+T.test("equal sequence claims elect the lexicographically first responder", function()
+    local GGM = loadModules()
+    local alice, bob, dave, eve = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Dave", "Silvermoon", "D"), identity("Eve", "Silvermoon", "E")
+    local daveDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(daveDb, alice, snapshot(GGM, 7100), 3))
+    local daveApi, daveSends, _, _, daveTimers = clientApi(dave); local daveSync = assert(GGM.CreateGuildSync(daveApi, daveDb))
+    local eveDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(eveDb, alice, snapshot(GGM, 7100), 3))
+    local eveApi, eveSends, _, _, eveTimers = clientApi(eve); local eveSync = assert(GGM.CreateGuildSync(eveApi, eveDb))
+    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001"))
+
+    T.assertEqual(GGM.HandleGuildSyncPayload(daveSync, bob.key, request), "snapshot-response-queued")
+    T.assertEqual(GGM.HandleGuildSyncPayload(eveSync, bob.key, request), "snapshot-response-queued")
+    T.assertEqual(daveTimers[1].delay, eveTimers[1].delay)
+
+    daveTimers[1]:Fire()
+    eveTimers[1]:Fire()
+    for _, send in ipairs(daveSends) do
+        GGM.HandleGuildSyncAddonMessage(eveSync, send.prefix, send.message, send.channel, dave.key)
+    end
+    for _, send in ipairs(eveSends) do
+        GGM.HandleGuildSyncAddonMessage(daveSync, send.prefix, send.message, send.channel, eve.key)
+    end
+
+    T.assertEqual(daveSync.pendingSnapshotResponseCount, 1)
+    T.assertEqual(eveSync.pendingSnapshotResponseCount, 0)
+    daveTimers[2]:Fire()
+    T.assertEqual(#daveSends, 2)
+    T.assertEqual(#eveSends, 1)
+end)
+
 T.test("snapshot response cancellation is scoped to requester", function()
     local GGM = loadModules()
     local alice, bob, eve, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Eve", "Silvermoon", "E"), identity("Carol", "Silvermoon", "C")

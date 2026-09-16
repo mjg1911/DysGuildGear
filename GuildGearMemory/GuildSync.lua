@@ -77,7 +77,8 @@ local function pendingSnapshotResponseTargetKey(requesterKey, targetKey)
 end
 
 local function rankIsBetter(sequence, responderKey, otherSequence, otherResponderKey)
-    return sequence >= otherSequence
+    if sequence ~= otherSequence then return sequence > otherSequence end
+    return responderKey < otherResponderKey
 end
 
 local function removePendingSnapshotResponse(sync, key, pending)
