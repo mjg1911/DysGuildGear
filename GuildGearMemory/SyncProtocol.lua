@@ -153,11 +153,13 @@ function GGM.EncodeSyncSnapshotResponseClaim(target, requester, responder, confi
     return encodePayload("C", fields)
 end
 
-function GGM.EncodeSyncSnapshotResponse(target, requester, snapshot, confirmedSequence, requestID)
+function GGM.EncodeSyncSnapshotResponse(target, requester, responder, snapshot, confirmedSequence, requestID)
     local targetValid, targetErr = GGM.ValidateSyncIdentity(target)
     if not targetValid then return nil, targetErr end
     local requesterValid, requesterErr = GGM.ValidateSyncIdentity(requester)
     if not requesterValid then return nil, requesterErr end
+    local responderValid, responderErr = GGM.ValidateSyncIdentity(responder)
+    if not responderValid then return nil, responderErr end
     local snapshotValid, snapshotErr = GGM.ValidateCompleteSnapshot(snapshot)
     if not snapshotValid then return nil, snapshotErr end
     local sequenceValid, sequenceErr = validateSequence(confirmedSequence)
@@ -169,6 +171,7 @@ function GGM.EncodeSyncSnapshotResponse(target, requester, snapshot, confirmedSe
     local fields = {}
     appendIdentity(fields, target)
     appendIdentity(fields, requester)
+    appendIdentity(fields, responder)
     table.insert(fields, requestID)
     table.insert(fields, tostring(confirmedSequence))
     table.insert(fields, tostring(snapshot.capturedAt))
@@ -248,7 +251,7 @@ function GGM.DecodeSyncMessage(payload)
     local fieldCount
     if typeCode == "U" then fieldCount = 10
     elseif typeCode == "Q" then fieldCount = 9
-    elseif typeCode == "S" then fieldCount = 11 + (#GGM.TRACKED_SLOTS * 4)
+    elseif typeCode == "S" then fieldCount = 15 + (#GGM.TRACKED_SLOTS * 4)
     elseif typeCode == "C" then fieldCount = 5
     else return nil, "sync-message-type-unknown" end
     local fields, cursor, fieldsErr = readFields(payload, 3, fieldCount)
@@ -292,14 +295,16 @@ function GGM.DecodeSyncMessage(payload)
     if not target then return nil, targetErr end
     local requester, requesterErr = decodeIdentity(fields, 5)
     if not requester then return nil, requesterErr end
-    local requestIDValid, requestIDErr = validateRequestID(fields[9])
+    local responder, responderErr = decodeIdentity(fields, 9)
+    if not responder then return nil, responderErr end
+    local requestIDValid, requestIDErr = validateRequestID(fields[13])
     if not requestIDValid then return nil, requestIDErr end
-    local sequence, sequenceErr = parseUnsignedInteger(fields[10], 0, GGM.SYNC_MAX_CONFIRMED_SEQUENCE, "sync-sequence-invalid")
+    local sequence, sequenceErr = parseUnsignedInteger(fields[14], 0, GGM.SYNC_MAX_CONFIRMED_SEQUENCE, "sync-sequence-invalid")
     if sequence == nil then return nil, sequenceErr end
-    local capturedAt, capturedErr = parseUnsignedInteger(fields[11], 0, GGM.SYNC_MAX_TIMESTAMP, "sync-captured-at-invalid")
+    local capturedAt, capturedErr = parseUnsignedInteger(fields[15], 0, GGM.SYNC_MAX_TIMESTAMP, "sync-captured-at-invalid")
     if capturedAt == nil then return nil, capturedErr end
     local snapshot = { complete = true, capturedAt = capturedAt, slots = {} }
-    local offset = 12
+    local offset = 16
     for _, trackedSlot in ipairs(GGM.TRACKED_SLOTS) do
         local slotKey, slotValue, slotErr = decodeSlot(fields, offset, trackedSlot.key)
         if not slotKey then return nil, slotErr end
@@ -308,5 +313,5 @@ function GGM.DecodeSyncMessage(payload)
     end
     local snapshotValid, snapshotErr = GGM.ValidateCompleteSnapshot(snapshot)
     if not snapshotValid then return nil, snapshotErr end
-    return { type = "SNAPSHOT_RESPONSE", target = target, requester = requester, requestID = fields[9], confirmedSequence = sequence, snapshot = snapshot }, nil
+    return { type = "SNAPSHOT_RESPONSE", target = target, requester = requester, responder = responder, requestID = fields[13], confirmedSequence = sequence, snapshot = snapshot }, nil
 end

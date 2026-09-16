@@ -21,7 +21,19 @@ local function clearExpiredSnapshotRequests(sync, now)
     for requestID, pending in pairs(sync.pendingSnapshotRequests) do
         if type(pending.expiresAt) ~= "number" or now >= pending.expiresAt then
             sync.pendingSnapshotRequests[requestID] = nil
+            if sync.pendingSnapshotRequestTargets[pending.targetKey] == requestID then
+                sync.pendingSnapshotRequestTargets[pending.targetKey] = nil
+            end
             sync.pendingSnapshotRequestCount = sync.pendingSnapshotRequestCount - 1
+        end
+    end
+end
+
+local function clearExpiredSnapshotRequestCooldowns(sync, now)
+    for targetKey, completedAt in pairs(sync.snapshotRequestCooldowns) do
+        if type(completedAt) ~= "number" or (now >= completedAt and now - completedAt >= GGM.SYNC_SNAPSHOT_REQUEST_COOLDOWN_SECONDS) then
+            sync.snapshotRequestCooldowns[targetKey] = nil
+            sync.snapshotRequestCooldownEntryCount = sync.snapshotRequestCooldownEntryCount - 1
         end
     end
 end
@@ -120,8 +132,6 @@ local function handleSnapshotRequest(sync, sender, message)
     if not identitiesCompatible(record.identity, message.target) then return "ignored", nil end
     local sequence, sequenceErr = GGM.GetConfirmedSequence(record)
     if sequence == nil then return nil, sequenceErr end
-    local payload, encodeErr = GGM.EncodeSyncSnapshotResponse(record.identity, message.requester, record.gear, sequence, message.requestID)
-    if not payload then return nil, encodeErr end
     local now, timeErr = getResponseTime(sync)
     if now == nil then return nil, timeErr end
     clearExpiredCooldowns(sync, now)
@@ -129,6 +139,8 @@ local function handleSnapshotRequest(sync, sender, message)
     if sync.snapshotResponseCooldownEntryCount >= GGM.SYNC_MAX_SNAPSHOT_RESPONSE_COOLDOWN_ENTRIES then return "ignored", nil end
     local responder, responderErr = GGM.BuildPlayerIdentity(sync.api)
     if not responder then return nil, responderErr end
+    local payload, encodeErr = GGM.EncodeSyncSnapshotResponse(record.identity, message.requester, responder, record.gear, sequence, message.requestID)
+    if not payload then return nil, encodeErr end
     local responseKey = snapshotResponseKey(message.requester.key, message.target.key, message.requestID)
     if sync.pendingSnapshotResponses[responseKey] then return "ignored", nil end
     local responseTargetKey = pendingSnapshotResponseTargetKey(message.requester.key, message.target.key)
@@ -175,6 +187,14 @@ end
 
 local function handleSnapshotResponseClaim(sync, sender, message)
     if sender ~= message.responder.key then return "ignored", nil end
+    local request = sync.pendingSnapshotRequests[message.requestID]
+    if request and request.requesterKey == message.requester.key and request.targetKey == message.target.key then
+        if not request.selectedResponderKey or rankIsBetter(message.confirmedSequence, message.responder.key, request.selectedSequence, request.selectedResponderKey) then
+            request.selectedSequence = message.confirmedSequence
+            request.selectedResponderKey = message.responder.key
+        end
+        return "snapshot-response-claim-recorded", nil
+    end
     local responseKey = snapshotResponseKey(message.requester.key, message.target.key, message.requestID)
     local pending = sync.pendingSnapshotResponses[responseKey]
     if not pending then return "ignored", nil end
@@ -183,7 +203,8 @@ local function handleSnapshotResponseClaim(sync, sender, message)
     return "snapshot-response-claim-accepted", nil
 end
 
-local function handleSnapshotResponse(sync, message)
+local function handleSnapshotResponse(sync, sender, message)
+    if sender ~= message.responder.key then return "ignored", nil end
     local pendingResponse = sync.pendingSnapshotResponses[snapshotResponseKey(message.requester.key, message.target.key, message.requestID)]
     if pendingResponse then
         local record = GGM.GetCompleteCharacterRecord(sync.db, message.target.key)
@@ -197,21 +218,34 @@ local function handleSnapshotResponse(sync, message)
     clearExpiredSnapshotRequests(sync, now)
     local pending = sync.pendingSnapshotRequests[message.requestID]
     if not pending or pending.targetKey ~= message.target.key or pending.requesterKey ~= message.requester.key then return "ignored", nil end
+    if not pending.selectedResponderKey or pending.selectedResponderKey ~= message.responder.key then return "ignored", nil end
     local saved, saveErr = GGM.SaveReceivedCompleteCharacterRecord(sync.db, message.target, message.snapshot, message.confirmedSequence)
     if not saved then
         if saveErr == "confirmed-sequence-regression" then return "ignored", nil end
         sync.pendingSnapshotRequests[message.requestID] = nil
+        if sync.pendingSnapshotRequestTargets[message.target.key] == message.requestID then
+            sync.pendingSnapshotRequestTargets[message.target.key] = nil
+        end
         sync.pendingSnapshotRequestCount = sync.pendingSnapshotRequestCount - 1
         return nil, saveErr
     end
     sync.pendingSnapshotRequests[message.requestID] = nil
+    if sync.pendingSnapshotRequestTargets[message.target.key] == message.requestID then
+        sync.pendingSnapshotRequestTargets[message.target.key] = nil
+    end
     sync.pendingSnapshotRequestCount = sync.pendingSnapshotRequestCount - 1
+    if not sync.snapshotRequestCooldowns[message.target.key] then
+        if sync.snapshotRequestCooldownEntryCount < GGM.SYNC_MAX_SNAPSHOT_REQUEST_COOLDOWN_ENTRIES then
+            sync.snapshotRequestCooldowns[message.target.key] = now
+            sync.snapshotRequestCooldownEntryCount = sync.snapshotRequestCooldownEntryCount + 1
+        end
+    end
     return "snapshot-saved", nil
 end
 
 function GGM.CreateGuildSync(api, db)
     if type(db) ~= "table" or type(db.characters) ~= "table" then return nil, "database-invalid" end
-    local sync = { api = api, db = db, transport = nil, snapshotResponseCooldowns = {}, snapshotResponseCooldownEntryCount = 0, pendingSnapshotResponses = {}, pendingSnapshotResponseTargets = {}, pendingSnapshotResponseCount = 0, pendingSnapshotRequests = {}, pendingSnapshotRequestCount = 0, nextRequestID = 0 }
+    local sync = { api = api, db = db, transport = nil, snapshotResponseCooldowns = {}, snapshotResponseCooldownEntryCount = 0, pendingSnapshotResponses = {}, pendingSnapshotResponseTargets = {}, pendingSnapshotResponseCount = 0, pendingSnapshotRequests = {}, pendingSnapshotRequestTargets = {}, pendingSnapshotRequestCount = 0, snapshotRequestCooldowns = {}, snapshotRequestCooldownEntryCount = 0, nextRequestID = 0 }
     local transport, transportErr = GGM.CreateSyncTransport(api, function(sender, payload)
         return GGM.HandleGuildSyncPayload(sync, sender, payload)
     end)
@@ -240,19 +274,27 @@ end
 function GGM.RequestCompleteSnapshot(sync, targetIdentity)
     local requester, requesterErr = GGM.BuildPlayerIdentity(sync.api)
     if not requester then return false, requesterErr end
+    local targetValid, targetErr = GGM.ValidateSyncIdentity(targetIdentity)
+    if not targetValid then return false, targetErr end
     local now, timeErr = getResponseTime(sync)
     if now == nil then return false, timeErr end
     clearExpiredSnapshotRequests(sync, now)
+    clearExpiredSnapshotRequestCooldowns(sync, now)
+    if sync.snapshotRequestCooldowns[targetIdentity.key] then return false, "sync-snapshot-request-cooldown" end
+    if sync.pendingSnapshotRequestTargets[targetIdentity.key] then return false, "sync-snapshot-request-pending" end
+    if sync.snapshotRequestCooldownEntryCount >= GGM.SYNC_MAX_SNAPSHOT_REQUEST_COOLDOWN_ENTRIES then return false, "sync-snapshot-request-cooldown-limit" end
     if sync.pendingSnapshotRequestCount >= GGM.SYNC_MAX_PENDING_SNAPSHOT_REQUESTS then return false, "sync-pending-request-limit" end
     local requestID = nextSnapshotRequestID(sync)
     if not requestID then return false, "sync-request-id-exhausted" end
     local payload, encodeErr = GGM.EncodeSyncSnapshotRequest(requester, targetIdentity, requestID)
     if not payload then return false, encodeErr end
-    sync.pendingSnapshotRequests[requestID] = { requesterKey = requester.key, targetKey = targetIdentity.key, expiresAt = now + GGM.SYNC_SNAPSHOT_REQUEST_TTL_SECONDS }
+    sync.pendingSnapshotRequests[requestID] = { requesterKey = requester.key, targetKey = targetIdentity.key, expiresAt = now + GGM.SYNC_SNAPSHOT_REQUEST_TTL_SECONDS, selectedResponderKey = nil, selectedSequence = -1 }
+    sync.pendingSnapshotRequestTargets[targetIdentity.key] = requestID
     sync.pendingSnapshotRequestCount = sync.pendingSnapshotRequestCount + 1
     local sent, sendErr = GGM.SendSyncPayload(sync.transport, payload)
     if not sent then
         sync.pendingSnapshotRequests[requestID] = nil
+        sync.pendingSnapshotRequestTargets[targetIdentity.key] = nil
         sync.pendingSnapshotRequestCount = sync.pendingSnapshotRequestCount - 1
         return false, sendErr
     end
@@ -265,7 +307,7 @@ function GGM.HandleGuildSyncPayload(sync, sender, payload)
     if message.type == "SLOT_UPDATE" then return handleSlotUpdate(sync, sender, message) end
     if message.type == "SNAPSHOT_REQUEST" then return handleSnapshotRequest(sync, sender, message) end
     if message.type == "SNAPSHOT_RESPONSE_CLAIM" then return handleSnapshotResponseClaim(sync, sender, message) end
-    if message.type == "SNAPSHOT_RESPONSE" then return handleSnapshotResponse(sync, message) end
+    if message.type == "SNAPSHOT_RESPONSE" then return handleSnapshotResponse(sync, sender, message) end
     return nil, "sync-message-type-unknown"
 end
 
