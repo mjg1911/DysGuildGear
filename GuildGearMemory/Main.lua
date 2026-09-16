@@ -10,6 +10,8 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             return
         end
 
+        GGM.RegisterSnapshotTestSlashCommand(_G)
+
         local db, err = GGM.InitializeDatabase(GuildGearMemoryDB)
         if not db then
             GGM.startupError = err
