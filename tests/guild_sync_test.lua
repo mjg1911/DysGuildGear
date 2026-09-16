@@ -44,10 +44,11 @@ local function clientApi(who, results)
         return results and results[#sends] or 0
     end
     api.C_Timer.NewTimer = function(delay, callback)
-        local timer = { delay = delay, fired = false }
+        local timer = { delay = delay, fired = false, cancelled = false }
         function timer:Fire()
-            if not self.fired then self.fired = true; callback() end
+            if not self.fired and not self.cancelled then self.fired = true; callback() end
         end
+        function timer:Cancel() self.cancelled = true end
         table.insert(timers, timer)
         return timer
     end
@@ -55,7 +56,21 @@ local function clientApi(who, results)
         local index = 1
         while index <= #timers do timers[index]:Fire(); index = index + 1 end
     end
-    return api, sends, drain, function(value) now = value end
+    return api, sends, drain, function(value) now = value end, timers
+end
+
+local function fireNextTimer(...)
+    local nextTimer
+    for timerSetIndex = 1, select("#", ...) do
+        for _, timer in ipairs(select(timerSetIndex, ...)) do
+            if not timer.fired and not timer.cancelled and (not nextTimer or timer.delay < nextTimer.delay) then
+                nextTimer = timer
+            end
+        end
+    end
+    if not nextTimer then return false end
+    nextTimer:Fire()
+    return true
 end
 
 local function deliver(GGM, sync, sends, sender)
@@ -110,17 +125,102 @@ T.test("explicit request receives a complete offline cached record", function()
     T.assertEqual(bobDb.characters[alice.key].confirmedSequence, 6)
 end)
 
-T.test("all eligible cached clients may answer the same request", function()
+T.test("a snapshot request produces at most one cached response", function()
     local GGM = loadModules()
     local alice, bob, carol, dave = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C"), identity("Dave", "Silvermoon", "D")
     local requestApi, requestSends, drain = clientApi(bob); local requester = assert(GGM.CreateGuildSync(requestApi, assert(GGM.InitializeDatabase(nil))))
     assert(GGM.RequestCompleteSnapshot(requester, alice)); drain()
     local carolDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(carolDb, alice, snapshot(GGM, 7100), 3))
-    local carolApi, carolSends = clientApi(carol); local carolSync = assert(GGM.CreateGuildSync(carolApi, carolDb))
+    local carolApi, carolSends, _, _, carolTimers = clientApi(carol); local carolSync = assert(GGM.CreateGuildSync(carolApi, carolDb))
     local daveDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(daveDb, alice, snapshot(GGM, 7100), 3))
-    local daveApi, daveSends = clientApi(dave); local daveSync = assert(GGM.CreateGuildSync(daveApi, daveDb))
+    local daveApi, daveSends, _, _, daveTimers = clientApi(dave); local daveSync = assert(GGM.CreateGuildSync(daveApi, daveDb))
     deliver(GGM, carolSync, requestSends, bob.key); deliver(GGM, daveSync, requestSends, bob.key)
-    T.assertTrue(#carolSends > 0); T.assertTrue(#daveSends > 0)
+    local deliveredCarol, deliveredDave = 0, 0
+    while fireNextTimer(carolTimers, daveTimers) do
+        while deliveredCarol < #carolSends do
+            deliveredCarol = deliveredCarol + 1
+            GGM.HandleGuildSyncAddonMessage(daveSync, carolSends[deliveredCarol].prefix, carolSends[deliveredCarol].message, carolSends[deliveredCarol].channel, carol.key)
+        end
+        while deliveredDave < #daveSends do
+            deliveredDave = deliveredDave + 1
+            GGM.HandleGuildSyncAddonMessage(carolSync, daveSends[deliveredDave].prefix, daveSends[deliveredDave].message, daveSends[deliveredDave].channel, dave.key)
+        end
+    end
+    local expectedWinnerSends = carolTimers[1].delay < daveTimers[1].delay and carolSends or daveSends
+    local expectedLoserSends = carolTimers[1].delay < daveTimers[1].delay and daveSends or carolSends
+    T.assertTrue(#expectedWinnerSends > 0)
+    T.assertEqual(#expectedLoserSends, 0)
+end)
+
+T.test("snapshot response cancellation is scoped to requester", function()
+    local GGM = loadModules()
+    local alice, bob, eve, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Eve", "Silvermoon", "E"), identity("Carol", "Silvermoon", "C")
+    local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 7200), 3))
+    local api, sends, _, _, timers = clientApi(carol); local sync = assert(GGM.CreateGuildSync(api, db))
+    local bobRequest = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001"))
+    local eveRequest = assert(GGM.EncodeSyncSnapshotRequest(eve, alice, "000001"))
+    T.assertEqual(GGM.HandleGuildSyncPayload(sync, bob.key, bobRequest), "snapshot-response-queued")
+    T.assertEqual(GGM.HandleGuildSyncPayload(sync, eve.key, eveRequest), "snapshot-response-queued")
+    local bobResponse = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 7200), 3, "000001"))
+    GGM.HandleGuildSyncPayload(sync, bob.key, bobResponse)
+    local active = 0
+    for _, timer in ipairs(timers) do if not timer.cancelled then active = active + 1 end end
+    T.assertEqual(active, 1)
+    T.assertEqual(sync.pendingSnapshotResponseCount, 1)
+    T.assertEqual(#sends, 0)
+end)
+
+T.test("a stale response does not cancel a fresher responder timer", function()
+    local GGM = loadModules()
+    local alice, bob, carol, dave = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C"), identity("Dave", "Silvermoon", "D")
+    local carolDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(carolDb, alice, snapshot(GGM, 7500), 10))
+    local carolApi, carolSends, _, _, carolTimers = clientApi(carol); local carolSync = assert(GGM.CreateGuildSync(carolApi, carolDb))
+    local daveDb = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(daveDb, alice, snapshot(GGM, 7400), 8))
+    local daveApi, daveSends, daveDrain = clientApi(dave); local daveSync = assert(GGM.CreateGuildSync(daveApi, daveDb))
+    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001"))
+    T.assertEqual(GGM.HandleGuildSyncPayload(carolSync, bob.key, request), "snapshot-response-queued")
+    T.assertEqual(GGM.HandleGuildSyncPayload(daveSync, bob.key, request), "snapshot-response-queued")
+    daveDrain()
+    for _, send in ipairs(daveSends) do
+        GGM.HandleGuildSyncAddonMessage(carolSync, send.prefix, send.message, send.channel, dave.key)
+    end
+    T.assertEqual(carolSync.pendingSnapshotResponseCount, 1)
+    T.assertFalse(carolTimers[1].cancelled)
+    carolTimers[1]:Fire()
+    T.assertEqual(carolSync.pendingSnapshotResponseCount, 0)
+    T.assertTrue(#carolSends > 0)
+end)
+
+T.test("pending delayed snapshot responses are capped", function()
+    local GGM = loadModules()
+    local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
+    local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 7300), 3))
+    local api, sends, _, _, timers = clientApi(carol); local sync = assert(GGM.CreateGuildSync(api, db))
+    for requestIndex = 1, GGM.SYNC_MAX_PENDING_SNAPSHOT_RESPONSES do
+        local requestID = string.format("%06d", requestIndex)
+        local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, requestID))
+        T.assertEqual(GGM.HandleGuildSyncPayload(sync, bob.key, request), "snapshot-response-queued")
+    end
+    local rejectedRequest = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000017"))
+    T.assertEqual(GGM.HandleGuildSyncPayload(sync, bob.key, rejectedRequest), "ignored")
+    T.assertEqual(sync.pendingSnapshotResponseCount, GGM.SYNC_MAX_PENDING_SNAPSHOT_RESPONSES)
+    T.assertEqual(#timers, GGM.SYNC_MAX_PENDING_SNAPSHOT_RESPONSES)
+    T.assertEqual(#sends, 0)
+    timers[1]:Fire()
+    T.assertEqual(sync.pendingSnapshotResponseCount, GGM.SYNC_MAX_PENDING_SNAPSHOT_RESPONSES - 1)
+end)
+
+T.test("failed delayed snapshot response timer creation does not leak pending state", function()
+    local GGM = loadModules()
+    local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
+    local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 7400), 3))
+    local api = clientApi(carol); api.C_Timer.NewTimer = function() return nil end
+    local sync = assert(GGM.CreateGuildSync(api, db))
+    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001"))
+    local state, err = GGM.HandleGuildSyncPayload(sync, bob.key, request)
+    T.assertNil(state); T.assertEqual(err, "sync-response-timer-create-failed")
+    T.assertEqual(sync.pendingSnapshotResponseCount, 0)
+    T.assertNil(next(sync.pendingSnapshotResponses))
 end)
 
 T.test("responder cooldown is bounded per requester and target", function()
@@ -128,7 +228,7 @@ T.test("responder cooldown is bounded per requester and target", function()
     local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
     local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 7150), 3))
     local api, sends, drain, setTime = clientApi(carol); local sync = assert(GGM.CreateGuildSync(api, db))
-    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice))
+    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001"))
     local state, err = GGM.HandleGuildSyncPayload(sync, bob.key, request)
     T.assertEqual(state, "snapshot-response-queued"); T.assertNil(err); drain(); local count = #sends
     setTime(200 + GGM.SYNC_SNAPSHOT_RESPONSE_COOLDOWN_SECONDS - 0.01)
@@ -143,7 +243,7 @@ T.test("unavailable or malformed request produces no response", function()
     local GGM = loadModules()
     local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
     local db = assert(GGM.InitializeDatabase(nil)); local api, sends = clientApi(carol); local sync = assert(GGM.CreateGuildSync(api, db))
-    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice)); local state, err = GGM.HandleGuildSyncPayload(sync, bob.key, request)
+    local request = assert(GGM.EncodeSyncSnapshotRequest(bob, alice, "000001")); local state, err = GGM.HandleGuildSyncPayload(sync, bob.key, request)
     T.assertEqual(state, "ignored"); T.assertNil(err); T.assertEqual(#sends, 0)
     db.characters[alice.key] = { complete = true, identity = alice, gear = { complete = true, capturedAt = 1, slots = {} }, confirmedSequence = 0 }
     state, err = GGM.HandleGuildSyncPayload(sync, bob.key, request)
@@ -154,9 +254,65 @@ T.test("lower sequence response cannot replace newer record", function()
     local GGM = loadModules()
     local alice, bob = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B")
     local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 8000), 9))
-    local sync = assert(GGM.CreateGuildSync(clientApi(bob), db)); local payload = assert(GGM.EncodeSyncSnapshotResponse(alice, snapshot(GGM, 9000, 1700003000), 8))
+    local sync = assert(GGM.CreateGuildSync(clientApi(bob), db)); local payload = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 9000, 1700003000), 8, "000001"))
     local state, err = GGM.HandleGuildSyncPayload(sync, "Carol-Silvermoon", payload)
-    T.assertNil(state); T.assertEqual(err, "confirmed-sequence-regression"); T.assertEqual(db.characters[alice.key].gear.slots.HEAD.itemID, 8001)
+    T.assertEqual(state, "ignored"); T.assertNil(err); T.assertEqual(db.characters[alice.key].gear.slots.HEAD.itemID, 8001)
+end)
+
+T.test("unsolicited snapshot response is rejected", function()
+    local GGM = loadModules()
+    local alice, bob = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B")
+    local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 8000), 9))
+    local sync = assert(GGM.CreateGuildSync(clientApi(bob), db))
+    local payload = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 9000), 10, "999999"))
+    local state, err = GGM.HandleGuildSyncPayload(sync, "Carol-Silvermoon", payload)
+    T.assertEqual(state, "ignored"); T.assertNil(err)
+    T.assertEqual(db.characters[alice.key].confirmedSequence, 9)
+    T.assertEqual(db.characters[alice.key].gear.slots.HEAD.itemID, 8001)
+end)
+
+T.test("snapshot response matching an explicit request is accepted", function()
+    local GGM = loadModules()
+    local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
+    local db = assert(GGM.InitializeDatabase(nil)); local api, sends, drain = clientApi(bob); local sync = assert(GGM.CreateGuildSync(api, db))
+    assert(GGM.RequestCompleteSnapshot(sync, alice)); drain()
+    local requestPayload = assert(sends[1].message:match("^F1|%d%d%d%d%d%d|%d%d|%d%d|(.*)$"))
+    local request = assert(GGM.DecodeSyncMessage(requestPayload))
+    local payload = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 9000), 10, request.requestID))
+    local state, err = GGM.HandleGuildSyncPayload(sync, carol.key, payload)
+    T.assertEqual(state, "snapshot-saved"); T.assertNil(err)
+    T.assertEqual(db.characters[alice.key].confirmedSequence, 10)
+end)
+
+T.test("stale snapshot response remains pending for a later better response", function()
+    local GGM = loadModules()
+    local alice, bob, carol = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B"), identity("Carol", "Silvermoon", "C")
+    local db = assert(GGM.InitializeDatabase(nil)); assert(GGM.SaveCompleteCharacterRecord(db, alice, snapshot(GGM, 8000), 9))
+    local api, sends, drain = clientApi(bob); local sync = assert(GGM.CreateGuildSync(api, db))
+    assert(GGM.RequestCompleteSnapshot(sync, alice)); drain()
+    local request = assert(GGM.DecodeSyncMessage(sends[1].message:match("^F1|%d%d%d%d%d%d|%d%d|%d%d|(.*)$")))
+    local stale = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 9000), 8, request.requestID))
+    T.assertEqual(GGM.HandleGuildSyncPayload(sync, carol.key, stale), "ignored")
+    T.assertEqual(sync.pendingSnapshotRequestCount, 1)
+    local better = assert(GGM.EncodeSyncSnapshotResponse(alice, bob, snapshot(GGM, 9100), 10, request.requestID))
+    T.assertEqual(GGM.HandleGuildSyncPayload(sync, carol.key, better), "snapshot-saved")
+    T.assertEqual(sync.pendingSnapshotRequestCount, 0)
+    T.assertEqual(db.characters[alice.key].confirmedSequence, 10)
+end)
+
+T.test("pending snapshot requests are bounded and expire", function()
+    local GGM = loadModules()
+    local alice, bob = identity("Alice", "Silvermoon", "A"), identity("Bob", "Silvermoon", "B")
+    local db = assert(GGM.InitializeDatabase(nil)); local api, sends, _, setTime = clientApi(bob); local sync = assert(GGM.CreateGuildSync(api, db))
+    for _ = 1, GGM.SYNC_MAX_PENDING_SNAPSHOT_REQUESTS do
+        T.assertTrue(GGM.RequestCompleteSnapshot(sync, alice))
+    end
+    local ok, err = GGM.RequestCompleteSnapshot(sync, alice)
+    T.assertFalse(ok); T.assertEqual(err, "sync-pending-request-limit")
+    setTime(200 + GGM.SYNC_SNAPSHOT_REQUEST_TTL_SECONDS)
+    T.assertTrue(GGM.RequestCompleteSnapshot(sync, alice))
+    T.assertEqual(sync.pendingSnapshotRequestCount, GGM.SYNC_MAX_PENDING_SNAPSHOT_REQUESTS)
+    T.assertTrue(#sends > 0)
 end)
 
 T.test("confirmed publication uses the persisted sequence and slot", function()

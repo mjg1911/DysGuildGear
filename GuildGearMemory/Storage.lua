@@ -277,6 +277,19 @@ function GGM.ApplyReceivedCharacterSlot(db, characterKey, slotKey, slotValue, co
         return false, "snapshot-slot-id-mismatch:" .. slotKey
     end
 
+    local existingSequence, sequenceErr = readConfirmedSequence(record)
+    if existingSequence == nil then
+        return false, sequenceErr
+    end
+
+    if confirmedSequence < existingSequence then
+        return false, "confirmed-sequence-regression"
+    end
+
+    if confirmedSequence > existingSequence + 1 then
+        return false, "confirmed-sequence-gap"
+    end
+
     record.gear.slots[slotKey] = copySlotValue(slotValue)
     record.gear.capturedAt = confirmedAt
     record.confirmedSequence = confirmedSequence

@@ -341,14 +341,14 @@ T.test("received slot update requires a complete baseline and stores the transmi
     local changedHead = { inventorySlotID = 1, itemID = 9100, itemLink = "|Hitem:9100|h[Remote]|h" }
 
     local missingOk, missingErr = GGM.ApplyReceivedCharacterSlot(
-        db, identity.key, "HEAD", changedHead, 1700000400, 7
+        db, identity.key, "HEAD", changedHead, 1700000400, 1
     )
     T.assertFalse(missingOk)
     T.assertEqual(missingErr, "record-missing")
 
     assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM)))
     local ok, err = GGM.ApplyReceivedCharacterSlot(
-        db, identity.key, "HEAD", changedHead, 1700000400, 7
+        db, identity.key, "HEAD", changedHead, 1700000400, 1
     )
 
     T.assertTrue(ok)
@@ -356,7 +356,53 @@ T.test("received slot update requires a complete baseline and stores the transmi
     local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
     T.assertEqual(record.gear.slots.HEAD.itemID, 9100)
     T.assertEqual(record.gear.capturedAt, 1700000400)
-    T.assertEqual(record.confirmedSequence, 7)
+    T.assertEqual(record.confirmedSequence, 1)
+end)
+
+T.test("received slot update rejects a sequence regression without mutation", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM), 8))
+
+    local ok, err = GGM.ApplyReceivedCharacterSlot(
+        db,
+        identity.key,
+        "HEAD",
+        { inventorySlotID = 1, itemID = 9300, itemLink = "|Hitem:9300|h[Older Update]|h" },
+        1700000800,
+        7
+    )
+
+    T.assertFalse(ok)
+    T.assertEqual(err, "confirmed-sequence-regression")
+    local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 2001)
+    T.assertEqual(record.confirmedSequence, 8)
+    T.assertEqual(record.gear.capturedAt, 1700000000)
+end)
+
+T.test("received slot update rejects a non-contiguous forward sequence without mutation", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local identity = makeIdentity()
+    assert(GGM.SaveCompleteCharacterRecord(db, identity, makeSnapshot(GGM), 4))
+
+    local ok, err = GGM.ApplyReceivedCharacterSlot(
+        db,
+        identity.key,
+        "HEAD",
+        { inventorySlotID = 1, itemID = 9400, itemLink = "|Hitem:9400|h[Skipped Update]|h" },
+        1700000900,
+        6
+    )
+
+    T.assertFalse(ok)
+    T.assertEqual(err, "confirmed-sequence-gap")
+    local record = assert(GGM.GetCompleteCharacterRecord(db, identity.key))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 2001)
+    T.assertEqual(record.confirmedSequence, 4)
+    T.assertEqual(record.gear.capturedAt, 1700000000)
 end)
 
 T.test("received slot update rejects a mismatched inventory slot id without mutation", function()
