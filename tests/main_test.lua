@@ -152,7 +152,7 @@ T.test("addon loaded initializes the SavedVariables database", function()
     end)
 end)
 
-T.test("player login starts stable gear tracking after database initialization", function()
+T.test("player login defers stable gear tracking until equipment is ready", function()
     local onEvent
     local frame = {
         RegisterEvent = function() end,
@@ -162,12 +162,19 @@ T.test("player login starts stable gear tracking after database initialization",
     }
 
     local startCount = 0
+    local deferredStartup
     local tracker = { pendingBySlot = {} }
 
     withGlobals({
         CreateFrame = function()
             return frame
         end,
+        C_Timer = {
+            After = function(delay, callback)
+                T.assertEqual(delay, 1)
+                deferredStartup = callback
+            end,
+        },
         GuildGearMemoryDB = NIL,
     }, function()
         local GGM = {
@@ -191,6 +198,10 @@ T.test("player login starts stable gear tracking after database initialization",
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
         onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
         onEvent(frame, "PLAYER_LOGIN")
+
+        T.assertEqual(startCount, 0)
+        T.assertNotNil(deferredStartup)
+        deferredStartup()
 
         T.assertEqual(startCount, 1)
         T.assertTrue(GGM.gearTracker == tracker)

@@ -30,14 +30,20 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             return
         end
 
-        local tracker, err = GGM.StartLocalPlayerGearTracking(
-            _G,
-            GGM.db,
-            GGM.DEFAULT_STABILITY_DELAY_SECONDS
-        )
-        GGM.gearTracker = tracker
-        GGM.lastGearTrackingError = err
-        GGM.lastCaptureError = err
+        C_Timer.After(1, function()
+            if GGM.gearTracker or GGM.startupError or not GGM.db then
+                return
+            end
+
+            local tracker, err = GGM.StartLocalPlayerGearTracking(
+                _G,
+                GGM.db,
+                GGM.DEFAULT_STABILITY_DELAY_SECONDS
+            )
+            GGM.gearTracker = tracker
+            GGM.lastGearTrackingError = err
+            GGM.lastCaptureError = err
+        end)
         return
     end
 
