@@ -55,6 +55,7 @@ end
 local function rememberResponse(sync, requesterKey, targetKey, now)
     local targetTimes = sync.snapshotResponseCooldowns[requesterKey]
     if not targetTimes then targetTimes = {}; sync.snapshotResponseCooldowns[requesterKey] = targetTimes end
+    if targetTimes[targetKey] ~= nil then return end
     targetTimes[targetKey] = now
     sync.snapshotResponseCooldownEntryCount = sync.snapshotResponseCooldownEntryCount + 1
 end
@@ -71,9 +72,20 @@ local function snapshotResponseKey(requesterKey, targetKey, requestID)
     return requesterKey .. "\031" .. targetKey .. "\031" .. requestID
 end
 
+local function pendingSnapshotResponseTargetKey(requesterKey, targetKey)
+    return requesterKey .. "\031" .. targetKey
+end
+
+local function rankIsBetter(sequence, responderKey, otherSequence, otherResponderKey)
+    return sequence >= otherSequence
+end
+
 local function removePendingSnapshotResponse(sync, key, pending)
     if sync.pendingSnapshotResponses[key] ~= pending then return false end
     sync.pendingSnapshotResponses[key] = nil
+    if sync.pendingSnapshotResponseTargets[pending.responseTargetKey] == pending then
+        sync.pendingSnapshotResponseTargets[pending.responseTargetKey] = nil
+    end
     sync.pendingSnapshotResponseCount = sync.pendingSnapshotResponseCount - 1
     return true
 end
@@ -83,6 +95,7 @@ local function cancelPendingSnapshotResponse(sync, requesterKey, targetKey, requ
     local pending = sync.pendingSnapshotResponses[key]
     if not pending then return end
     if pending.timer and type(pending.timer.Cancel) == "function" then pending.timer:Cancel() end
+    if pending.settleTimer and type(pending.settleTimer.Cancel) == "function" then pending.settleTimer:Cancel() end
     removePendingSnapshotResponse(sync, key, pending)
 end
 
@@ -117,19 +130,39 @@ local function handleSnapshotRequest(sync, sender, message)
     if not responder then return nil, responderErr end
     local responseKey = snapshotResponseKey(message.requester.key, message.target.key, message.requestID)
     if sync.pendingSnapshotResponses[responseKey] then return "ignored", nil end
+    local responseTargetKey = pendingSnapshotResponseTargetKey(message.requester.key, message.target.key)
+    if sync.pendingSnapshotResponseTargets[responseTargetKey] then return "ignored", nil end
     if sync.pendingSnapshotResponseCount >= GGM.SYNC_MAX_PENDING_SNAPSHOT_RESPONSES then return "ignored", nil end
-    local pending = { requesterKey = message.requester.key, targetKey = message.target.key, requestID = message.requestID }
+    local claimPayload, claimErr = GGM.EncodeSyncSnapshotResponseClaim(record.identity, message.requester, responder, sequence, message.requestID)
+    if not claimPayload then return nil, claimErr end
+    local pending = { requesterKey = message.requester.key, targetKey = message.target.key, requestID = message.requestID, responseTargetKey = responseTargetKey, responderKey = responder.key, confirmedSequence = sequence }
     sync.pendingSnapshotResponses[responseKey] = pending
+    sync.pendingSnapshotResponseTargets[responseTargetKey] = pending
     sync.pendingSnapshotResponseCount = sync.pendingSnapshotResponseCount + 1
     local timerOk, timerOrError = pcall(sync.api.C_Timer.NewTimer, responseDelay(message.requester.key, message.target.key, responder.key), function()
-        if not removePendingSnapshotResponse(sync, responseKey, pending) then return end
-        local queued, queueErr = GGM.SendSyncPayload(sync.transport, payload)
-        if queued then
-            local sentAt = getResponseTime(sync)
-            rememberResponse(sync, message.requester.key, message.target.key, sentAt or now)
-        else
-            sync.transport.lastSendError = queueErr
+        if sync.pendingSnapshotResponses[responseKey] ~= pending then return end
+        local claimQueued, claimQueueErr = GGM.SendSyncPayload(sync.transport, claimPayload)
+        if not claimQueued then
+            sync.transport.lastSendError = claimQueueErr
+            removePendingSnapshotResponse(sync, responseKey, pending)
+            return
         end
+        local settleOk, settleTimer = pcall(sync.api.C_Timer.NewTimer, GGM.SYNC_SNAPSHOT_RESPONSE_OFFER_SETTLE_SECONDS, function()
+            if not removePendingSnapshotResponse(sync, responseKey, pending) then return end
+            local queued, queueErr = GGM.SendSyncPayload(sync.transport, payload)
+            if queued then
+                local sentAt = getResponseTime(sync)
+                rememberResponse(sync, message.requester.key, message.target.key, sentAt or now)
+            else
+                sync.transport.lastSendError = queueErr
+            end
+        end)
+        if not settleOk or settleTimer == nil then
+            removePendingSnapshotResponse(sync, responseKey, pending)
+            sync.transport.lastSendError = "sync-response-timer-create-failed"
+            return
+        end
+        pending.settleTimer = settleTimer
     end)
     if not timerOk or timerOrError == nil then
         removePendingSnapshotResponse(sync, responseKey, pending)
@@ -137,6 +170,16 @@ local function handleSnapshotRequest(sync, sender, message)
     end
     pending.timer = timerOrError
     return "snapshot-response-queued", nil
+end
+
+local function handleSnapshotResponseClaim(sync, sender, message)
+    if sender ~= message.responder.key then return "ignored", nil end
+    local responseKey = snapshotResponseKey(message.requester.key, message.target.key, message.requestID)
+    local pending = sync.pendingSnapshotResponses[responseKey]
+    if not pending then return "ignored", nil end
+    if not rankIsBetter(message.confirmedSequence, message.responder.key, pending.confirmedSequence, pending.responderKey) then return "ignored", nil end
+    cancelPendingSnapshotResponse(sync, message.requester.key, message.target.key, message.requestID)
+    return "snapshot-response-claim-accepted", nil
 end
 
 local function handleSnapshotResponse(sync, message)
@@ -167,7 +210,7 @@ end
 
 function GGM.CreateGuildSync(api, db)
     if type(db) ~= "table" or type(db.characters) ~= "table" then return nil, "database-invalid" end
-    local sync = { api = api, db = db, transport = nil, snapshotResponseCooldowns = {}, snapshotResponseCooldownEntryCount = 0, pendingSnapshotResponses = {}, pendingSnapshotResponseCount = 0, pendingSnapshotRequests = {}, pendingSnapshotRequestCount = 0, nextRequestID = 0 }
+    local sync = { api = api, db = db, transport = nil, snapshotResponseCooldowns = {}, snapshotResponseCooldownEntryCount = 0, pendingSnapshotResponses = {}, pendingSnapshotResponseTargets = {}, pendingSnapshotResponseCount = 0, pendingSnapshotRequests = {}, pendingSnapshotRequestCount = 0, nextRequestID = 0 }
     local transport, transportErr = GGM.CreateSyncTransport(api, function(sender, payload)
         return GGM.HandleGuildSyncPayload(sync, sender, payload)
     end)
@@ -220,6 +263,7 @@ function GGM.HandleGuildSyncPayload(sync, sender, payload)
     if not message then return nil, decodeErr end
     if message.type == "SLOT_UPDATE" then return handleSlotUpdate(sync, sender, message) end
     if message.type == "SNAPSHOT_REQUEST" then return handleSnapshotRequest(sync, sender, message) end
+    if message.type == "SNAPSHOT_RESPONSE_CLAIM" then return handleSnapshotResponseClaim(sync, sender, message) end
     if message.type == "SNAPSHOT_RESPONSE" then return handleSnapshotResponse(sync, message) end
     return nil, "sync-message-type-unknown"
 end

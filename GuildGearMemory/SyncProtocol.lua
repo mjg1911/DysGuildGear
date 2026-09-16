@@ -126,6 +126,33 @@ function GGM.EncodeSyncSnapshotRequest(requester, target, requestID)
     return encodePayload("Q", fields)
 end
 
+function GGM.EncodeSyncSnapshotResponseClaim(target, requester, responder, confirmedSequence, requestID)
+    local targetValid, targetErr = GGM.ValidateSyncIdentity(target)
+    if not targetValid then return nil, targetErr end
+    local requesterValid, requesterErr = GGM.ValidateSyncIdentity(requester)
+    if not requesterValid then return nil, requesterErr end
+    local responderValid, responderErr = GGM.ValidateSyncIdentity(responder)
+    if not responderValid then return nil, responderErr end
+    local sequenceValid, sequenceErr = validateSequence(confirmedSequence)
+    if not sequenceValid then return nil, sequenceErr end
+    local requestIDValid, requestIDErr = validateRequestID(requestID)
+    if not requestIDValid then return nil, requestIDErr end
+    local keyMaximum = GGM.SYNC_MAX_NAME_BYTES + GGM.SYNC_MAX_REALM_BYTES + 1
+    local targetKeyValid, targetKeyErr = validateBoundedString(target.key, keyMaximum, "sync-claim-target-key", false)
+    if not targetKeyValid then return nil, targetKeyErr end
+    local requesterKeyValid, requesterKeyErr = validateBoundedString(requester.key, keyMaximum, "sync-claim-requester-key", false)
+    if not requesterKeyValid then return nil, requesterKeyErr end
+    local responderKeyValid, responderKeyErr = validateBoundedString(responder.key, keyMaximum, "sync-claim-responder-key", false)
+    if not responderKeyValid then return nil, responderKeyErr end
+    local fields = {}
+    table.insert(fields, target.key)
+    table.insert(fields, requester.key)
+    table.insert(fields, responder.key)
+    table.insert(fields, tostring(confirmedSequence))
+    table.insert(fields, requestID)
+    return encodePayload("C", fields)
+end
+
 function GGM.EncodeSyncSnapshotResponse(target, requester, snapshot, confirmedSequence, requestID)
     local targetValid, targetErr = GGM.ValidateSyncIdentity(target)
     if not targetValid then return nil, targetErr end
@@ -222,6 +249,7 @@ function GGM.DecodeSyncMessage(payload)
     if typeCode == "U" then fieldCount = 10
     elseif typeCode == "Q" then fieldCount = 9
     elseif typeCode == "S" then fieldCount = 11 + (#GGM.TRACKED_SLOTS * 4)
+    elseif typeCode == "C" then fieldCount = 5
     else return nil, "sync-message-type-unknown" end
     local fields, cursor, fieldsErr = readFields(payload, 3, fieldCount)
     if not fields then return nil, fieldsErr end
@@ -245,6 +273,20 @@ function GGM.DecodeSyncMessage(payload)
         local requestIDValid, requestIDErr = validateRequestID(fields[9])
         if not requestIDValid then return nil, requestIDErr end
         return { type = "SNAPSHOT_REQUEST", requester = requester, target = target, requestID = fields[9] }, nil
+    end
+    if typeCode == "C" then
+        local keyMaximum = GGM.SYNC_MAX_NAME_BYTES + GGM.SYNC_MAX_REALM_BYTES + 1
+        local targetValid, targetErr = validateBoundedString(fields[1], keyMaximum, "sync-claim-target-key", false)
+        if not targetValid then return nil, targetErr end
+        local requesterValid, requesterErr = validateBoundedString(fields[2], keyMaximum, "sync-claim-requester-key", false)
+        if not requesterValid then return nil, requesterErr end
+        local responderValid, responderErr = validateBoundedString(fields[3], keyMaximum, "sync-claim-responder-key", false)
+        if not responderValid then return nil, responderErr end
+        local sequence, sequenceErr = parseUnsignedInteger(fields[4], 0, GGM.SYNC_MAX_CONFIRMED_SEQUENCE, "sync-sequence-invalid")
+        if sequence == nil then return nil, sequenceErr end
+        local requestIDValid, requestIDErr = validateRequestID(fields[5])
+        if not requestIDValid then return nil, requestIDErr end
+        return { type = "SNAPSHOT_RESPONSE_CLAIM", target = { key = fields[1] }, requester = { key = fields[2] }, responder = { key = fields[3] }, confirmedSequence = sequence, requestID = fields[5] }, nil
     end
     local target, targetErr = decodeIdentity(fields, 1)
     if not target then return nil, targetErr end
