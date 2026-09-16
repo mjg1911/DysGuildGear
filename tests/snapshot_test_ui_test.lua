@@ -292,3 +292,49 @@ T.test("ggm slash command opens the saved snapshot for the current database", fu
     T.assertTrue(calledApi == api)
     T.assertTrue(calledDB == db)
 end)
+
+T.test("snapshot slash command can explicitly request exactly one named character", function()
+    local GGM = loadUI()
+    local requestedSync
+    local requestedTarget
+    local api = {
+        SlashCmdList = {},
+    }
+    local sync = { marker = "sync" }
+    GGM.guildSync = sync
+    GGM.RequestCompleteSnapshot = function(activeSync, target)
+        requestedSync = activeSync
+        requestedTarget = target
+        return true, nil
+    end
+
+    GGM.RegisterSnapshotTestSlashCommand(api)
+    api.SlashCmdList.GUILDGEARMEMORY("request Alice-Silvermoon")
+
+    T.assertTrue(requestedSync == sync)
+    T.assertNotNil(requestedTarget)
+    T.assertEqual(requestedTarget.key, "Alice-Silvermoon")
+    T.assertEqual(requestedTarget.name, "Alice")
+    T.assertEqual(requestedTarget.realm, "Silvermoon")
+    T.assertNil(requestedTarget.guid)
+    T.assertNil(GGM.lastSyncError)
+end)
+
+T.test("snapshot slash command rejects malformed requests without sending", function()
+    local GGM = loadUI()
+    local sendCount = 0
+    local api = {
+        SlashCmdList = {},
+    }
+    GGM.guildSync = {}
+    GGM.RequestCompleteSnapshot = function()
+        sendCount = sendCount + 1
+        return true, nil
+    end
+
+    GGM.RegisterSnapshotTestSlashCommand(api)
+    api.SlashCmdList.GUILDGEARMEMORY("request Alice")
+
+    T.assertEqual(sendCount, 0)
+    T.assertEqual(GGM.lastSyncError, "request-target-invalid")
+end)

@@ -35,9 +35,21 @@ end
 
 local function stubSnapshotUI(GGM, registerFn)
     GGM.RegisterSnapshotTestSlashCommand = registerFn or function() end
+    GGM.CreateGuildSync = GGM.CreateGuildSync or function()
+        return {}, nil
+    end
+    GGM.RegisterGuildSync = GGM.RegisterGuildSync or function()
+        return true, nil
+    end
+    GGM.PublishConfirmedSlot = GGM.PublishConfirmedSlot or function()
+        return true, nil
+    end
+    GGM.HandleGuildSyncAddonMessage = GGM.HandleGuildSyncAddonMessage or function()
+        return "ignored", nil
+    end
 end
 
-T.test("main registers Phase 3 local gear events and no addon-message event", function()
+T.test("main registers Phase 4 local gear and addon-message events", function()
     local registered = {}
     local onEvent
     local frame = {
@@ -73,7 +85,7 @@ T.test("main registers Phase 3 local gear events and no addon-message event", fu
         T.assertTrue(registered.ADDON_LOADED == true)
         T.assertTrue(registered.PLAYER_LOGIN == true)
         T.assertTrue(registered.PLAYER_EQUIPMENT_CHANGED == true)
-        T.assertFalse(registered.CHAT_MSG_ADDON == true)
+        T.assertTrue(registered.CHAT_MSG_ADDON == true)
         T.assertNotNil(onEvent)
     end)
 end)
@@ -104,9 +116,9 @@ T.test("addon loaded registers the snapshot slash command", function()
         GGM.HandlePlayerEquipmentChanged = function()
             return "ignored", nil
         end
-        GGM.RegisterSnapshotTestSlashCommand = function(api)
+        stubSnapshotUI(GGM, function(api)
             registeredApi = api
-        end
+        end)
 
         T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
         onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
@@ -328,5 +340,250 @@ T.test("unsupported saved schema blocks tracking instead of overwriting data", f
 
         T.assertEqual(startCount, 0)
         T.assertEqual(GGM.startupError, "unsupported-schema-version:99")
+    end)
+end)
+
+T.test("addon loaded creates and registers guild sync without sending a logical message", function()
+    local onEvent
+    local publishCount = 0
+    local createdDb
+    local sync = { marker = "sync" }
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {}
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function()
+            createdDb = { schemaVersion = 1, characters = {} }
+            return createdDb, nil
+        end
+        GGM.CreateGuildSync = function(api, db)
+            T.assertTrue(api == _G)
+            T.assertTrue(db == createdDb)
+            return sync, nil
+        end
+        GGM.RegisterGuildSync = function(activeSync)
+            T.assertTrue(activeSync == sync)
+            return true, nil
+        end
+        GGM.PublishConfirmedSlot = function()
+            publishCount = publishCount + 1
+            return true, nil
+        end
+        GGM.StartLocalPlayerGearTracking = function()
+            return {}, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+
+        T.assertTrue(GGM.guildSync == sync)
+        T.assertEqual(publishCount, 0)
+        T.assertNil(GGM.lastSyncError)
+    end)
+end)
+
+T.test("player login passes a post-persistence publisher into local tracking but does not publish by itself", function()
+    local onEvent
+    local deferredStartup
+    local confirmationCallback
+    local publishCount = 0
+    local sync = { marker = "sync" }
+    local tracker = { marker = "tracker" }
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        C_Timer = {
+            After = function(_, callback)
+                deferredStartup = callback
+            end,
+        },
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {
+            DEFAULT_STABILITY_DELAY_SECONDS = 300,
+        }
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function()
+            return { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.CreateGuildSync = function()
+            return sync, nil
+        end
+        GGM.RegisterGuildSync = function()
+            return true, nil
+        end
+        GGM.StartLocalPlayerGearTracking = function(_, _, delay, onConfirmed)
+            T.assertEqual(delay, 300)
+            confirmationCallback = onConfirmed
+            return tracker, nil
+        end
+        GGM.PublishConfirmedSlot = function(activeSync, characterKey, slotKey, slotValue, confirmedAt, confirmedSequence)
+            T.assertTrue(activeSync == sync)
+            T.assertEqual(characterKey, "Alice-Silvermoon")
+            T.assertEqual(slotKey, "HEAD")
+            T.assertEqual(slotValue.itemID, 9999)
+            T.assertEqual(confirmedAt, 1700003000)
+            T.assertEqual(confirmedSequence, 6)
+            publishCount = publishCount + 1
+            return true, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+        onEvent(frame, "PLAYER_LOGIN")
+
+        T.assertEqual(publishCount, 0)
+        T.assertNotNil(deferredStartup)
+        deferredStartup()
+        T.assertEqual(publishCount, 0)
+        T.assertNotNil(confirmationCallback)
+
+        confirmationCallback(
+            "Alice-Silvermoon",
+            "HEAD",
+            { inventorySlotID = 1, itemID = 9999, itemLink = "|Hitem:9999|h[Test]|h" },
+            1700003000,
+            6
+        )
+
+        T.assertEqual(publishCount, 1)
+        T.assertNil(GGM.lastSyncError)
+    end)
+end)
+
+T.test("chat msg addon routes the full addon-message tuple to guild sync", function()
+    local onEvent
+    local received
+    local sync = { marker = "sync" }
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {}
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function()
+            return { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.CreateGuildSync = function()
+            return sync, nil
+        end
+        GGM.RegisterGuildSync = function()
+            return true, nil
+        end
+        GGM.StartLocalPlayerGearTracking = function()
+            return {}, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
+        end
+        GGM.HandleGuildSyncAddonMessage = function(activeSync, prefix, text, channel, sender)
+            received = {
+                sync = activeSync,
+                prefix = prefix,
+                text = text,
+                channel = channel,
+                sender = sender,
+            }
+            return "slot-applied", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+        onEvent(frame, "CHAT_MSG_ADDON", "DysGuildGear", "frame", "GUILD", "Alice-Silvermoon")
+
+        T.assertTrue(received.sync == sync)
+        T.assertEqual(received.prefix, "DysGuildGear")
+        T.assertEqual(received.text, "frame")
+        T.assertEqual(received.channel, "GUILD")
+        T.assertEqual(received.sender, "Alice-Silvermoon")
+        T.assertNil(GGM.lastSyncReceiveError)
+    end)
+end)
+
+T.test("sync registration failure does not disable local stable tracking", function()
+    local onEvent
+    local deferredStartup
+    local startCount = 0
+    local frame = {
+        RegisterEvent = function() end,
+        SetScript = function(_, _, handler)
+            onEvent = handler
+        end,
+    }
+
+    withGlobals({
+        CreateFrame = function()
+            return frame
+        end,
+        C_Timer = {
+            After = function(_, callback)
+                deferredStartup = callback
+            end,
+        },
+        GuildGearMemoryDB = NIL,
+    }, function()
+        local GGM = {
+            DEFAULT_STABILITY_DELAY_SECONDS = 300,
+        }
+        stubSnapshotUI(GGM)
+        GGM.InitializeDatabase = function()
+            return { schemaVersion = 1, characters = {} }, nil
+        end
+        GGM.CreateGuildSync = function()
+            return {}, nil
+        end
+        GGM.RegisterGuildSync = function()
+            return false, "prefix-register-failed:MaxPrefixes"
+        end
+        GGM.StartLocalPlayerGearTracking = function()
+            startCount = startCount + 1
+            return {}, nil
+        end
+        GGM.HandlePlayerEquipmentChanged = function()
+            return "ignored", nil
+        end
+
+        T.loadAddonFile("GuildGearMemory/Main.lua", GGM)
+        onEvent(frame, "ADDON_LOADED", "GuildGearMemory")
+        onEvent(frame, "PLAYER_LOGIN")
+        deferredStartup()
+
+        T.assertEqual(startCount, 1)
+        T.assertNil(GGM.guildSync)
+        T.assertEqual(GGM.lastSyncError, "prefix-register-failed:MaxPrefixes")
     end)
 end)
