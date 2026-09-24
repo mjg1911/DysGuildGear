@@ -1,8 +1,5 @@
 local _, GGM = ...
 
-local SNAPSHOT_RESPONSE_DELAY_SECONDS = 0.25
-local SNAPSHOT_RESPONSE_DELAY_BUCKETS = 8
-
 local function identitiesCompatible(left, right)
     if type(left) ~= "table" or type(right) ~= "table" then return false end
     if left.key ~= right.key or left.name ~= right.name or left.realm ~= right.realm then return false end
@@ -77,7 +74,8 @@ local function responseDelay(requesterKey, targetKey, responderKey)
     for textIndex = 1, #requesterKey do hash = (hash + string.byte(requesterKey, textIndex)) % 2147483647 end
     for textIndex = 1, #targetKey do hash = (hash + string.byte(targetKey, textIndex)) % 2147483647 end
     for textIndex = 1, #responderKey do hash = (hash + string.byte(responderKey, textIndex)) % 2147483647 end
-    return SNAPSHOT_RESPONSE_DELAY_SECONDS * (1 + (hash % SNAPSHOT_RESPONSE_DELAY_BUCKETS))
+    return GGM.SYNC_SNAPSHOT_RESPONSE_DELAY_STEP_SECONDS
+        * (1 + (hash % GGM.SYNC_SNAPSHOT_RESPONSE_DELAY_BUCKETS))
 end
 
 local function snapshotResponseKey(requesterKey, targetKey, requestID)

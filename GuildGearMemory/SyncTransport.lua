@@ -136,6 +136,11 @@ function GGM.HandleSyncTransportMessage(transport, prefix, text, channel, sender
         if not byMessageID then byMessageID = {}; transport.inboundAssemblies[sender] = byMessageID end
         assembly = { total = frame.total, chunks = {}, received = 0, bytes = 0, updatedAt = now }
         byMessageID[frame.messageID] = assembly
+    elseif frame.index == 1 then
+        -- Per-sender frames are serialized. Every first frame starts a fresh
+        -- logical message, including after a sender reload reused its ID.
+        assembly = { total = frame.total, chunks = {}, received = 0, bytes = 0, updatedAt = now }
+        byMessageID[frame.messageID] = assembly
     elseif assembly.total ~= frame.total then
         byMessageID[frame.messageID] = nil
         local err = "sync-frame-total-mismatch"; transport.lastReceiveError = err; return nil, err
