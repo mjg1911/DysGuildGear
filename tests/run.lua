@@ -8,6 +8,9 @@ local suites = {
     "tests.local_gear_memory_test",
     "tests.snapshot_test_ui_test",
     "tests.stable_gear_tracker_test",
+    "tests.sync_protocol_test",
+    "tests.sync_transport_test",
+    "tests.guild_sync_test",
     "tests.main_test",
 }
 

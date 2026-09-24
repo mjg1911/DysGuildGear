@@ -170,3 +170,16 @@ T.test("starting tracking with an existing record preserves shared gear and star
     T.assertEqual(afterConfirm.gear.slots.HEAD.itemID, 9999)
     T.assertEqual(afterConfirm.gear.capturedAt, 1700000200)
 end)
+
+T.test("local tracking threads the confirmation callback into the stable tracker", function()
+    local GGM = loadModules()
+    local db = assert(GGM.InitializeDatabase(nil))
+    local api = makeApi(GGM)
+    local callback = function() end
+
+    local tracker, err = GGM.StartLocalPlayerGearTracking(api, db, 5, callback)
+
+    T.assertNil(err)
+    T.assertNotNil(tracker)
+    T.assertTrue(tracker.onConfirmed == callback)
+end)

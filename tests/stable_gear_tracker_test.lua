@@ -311,3 +311,76 @@ T.test("an untracked equipment slot is ignored", function()
     T.assertEqual(state, "ignored")
     T.assertEqual(#timers, 0)
 end)
+
+T.test("confirmed slot callback fires once after sequence and slot are persisted", function()
+    local GGM = loadModules()
+    local api, db, timers, slotIDs, setSlot, setTime = makeEnvironment(GGM)
+    local calls = {}
+
+    local tracker = assert(GGM.CreateStableGearTracker(
+        api,
+        db,
+        "Alice-Silvermoon",
+        300,
+        function(characterKey, slotKey, slotValue, confirmedAt, confirmedSequence)
+            local record = assert(GGM.GetCompleteCharacterRecord(db, characterKey))
+            table.insert(calls, {
+                characterKey = characterKey,
+                slotKey = slotKey,
+                itemID = slotValue.itemID,
+                confirmedAt = confirmedAt,
+                confirmedSequence = confirmedSequence,
+                persistedSequence = record.confirmedSequence,
+                persistedItemID = record.gear.slots[slotKey].itemID,
+            })
+        end
+    ))
+
+    setSlot("HEAD", 9200, "|Hitem:9200|h[Confirmed]|h")
+    assert(GGM.HandlePlayerEquipmentChanged(tracker, slotIDs.HEAD))
+    setTime(1700000300)
+    timers[1]:Fire()
+
+    T.assertEqual(#calls, 1)
+    T.assertEqual(calls[1].characterKey, "Alice-Silvermoon")
+    T.assertEqual(calls[1].slotKey, "HEAD")
+    T.assertEqual(calls[1].itemID, 9200)
+    T.assertEqual(calls[1].confirmedAt, 1700000300)
+    T.assertEqual(calls[1].confirmedSequence, 1)
+    T.assertEqual(calls[1].persistedSequence, 1)
+    T.assertEqual(calls[1].persistedItemID, 9200)
+end)
+
+T.test("confirmation callback is not fired when persistence fails", function()
+    local GGM = loadModules()
+    local api, db, timers, slotIDs, setSlot = makeEnvironment(GGM)
+    local callCount = 0
+    local tracker = assert(GGM.CreateStableGearTracker(api, db, "Alice-Silvermoon", 300, function()
+        callCount = callCount + 1
+    end))
+
+    setSlot("HEAD", 9300, "|Hitem:9300|h[Candidate]|h")
+    assert(GGM.HandlePlayerEquipmentChanged(tracker, slotIDs.HEAD))
+    db.characters["Alice-Silvermoon"].complete = false
+    timers[1]:Fire()
+
+    T.assertEqual(callCount, 0)
+end)
+
+T.test("confirmation callback failure never rolls back a persisted confirmation", function()
+    local GGM = loadModules()
+    local api, db, timers, slotIDs, setSlot, setTime = makeEnvironment(GGM)
+    local tracker = assert(GGM.CreateStableGearTracker(api, db, "Alice-Silvermoon", 300, function()
+        error("sync callback exploded")
+    end))
+
+    setSlot("HEAD", 9400, "|Hitem:9400|h[Confirmed]|h")
+    assert(GGM.HandlePlayerEquipmentChanged(tracker, slotIDs.HEAD))
+    setTime(1700000300)
+    timers[1]:Fire()
+
+    local record = assert(GGM.GetCompleteCharacterRecord(db, "Alice-Silvermoon"))
+    T.assertEqual(record.gear.slots.HEAD.itemID, 9400)
+    T.assertEqual(record.confirmedSequence, 1)
+    T.assertNotNil(tracker.lastConfirmationCallbackError)
+end)
